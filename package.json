@@ -1,0 +1,11 @@
+{
+  "name": "asr-llm",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Talk, and get written answers: Deepgram Flux speech-to-text + Groq openai/gpt-oss-120b",
+  "engines": { "node": ">=22.9" },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env server.js"
+  }
+}

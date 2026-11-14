@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Voice Chat</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <aside id="sidebar">
+    <button id="newChat" class="primary">+ New chat</button>
+    <nav id="chatList" aria-label="Chats"></nav>
+    <button id="openSettings" class="ghost">System prompt</button>
+  </aside>
+
+  <main>
+    <header>
+      <button id="toggleSidebar" class="ghost" aria-label="Toggle chat list">☰</button>
+      <h1 id="chatTitle">New chat</h1>
+      <span id="status" data-state="muted">Muted</span>
+    </header>
+
+    <section id="messages" aria-live="polite"></section>
+
+    <footer>
+      <p id="error" role="alert" hidden></p>
+      <button id="mic" class="mic" aria-pressed="false">
+        <span class="dot"></span><span id="micLabel">Unmute</span>
+      </button>
+      <p class="hint">Unmute and just talk — answers appear as you finish speaking.</p>
+    </footer>
+  </main>
+
+  <dialog id="settings">
+    <form method="dialog">
+      <h2>System prompt</h2>
+      <p class="hint">Sent with every request. Saved in this browser.</p>
+      <textarea id="systemPrompt" rows="10" spellcheck="false"></textarea>
+      <div class="row">
+        <button type="button" id="resetPrompt" class="ghost">Reset to default</button>
+        <span class="spacer"></span>
+        <button value="cancel" class="ghost">Cancel</button>
+        <button value="save" class="primary">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="app.js" type="module"></script>
+</body>
+</html>
