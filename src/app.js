@@ -359,6 +359,14 @@ function onFlux(msg, s) {
 // Nova-3 (/v1/listen): finalized segments are concatenated until speech_final
 // (or UtteranceEnd) marks the end of the utterance.
 function onNova(msg, s) {
+  // Flux reports these; Nova used to drop everything that wasn't a transcript.
+  if (msg.type === "Error" || msg.err_msg || msg.err_code) {
+    return showError(`Deepgram: ${msg.description || msg.err_msg || msg.message || msg.code || msg.err_code}`);
+  }
+  if ((msg.type === "Close" || msg.type === "Closed") && session === s) {
+    const detail = msg.description || msg.reason;
+    return showError(`Deepgram closed the stream${detail ? `: ${detail}` : ""}.`);
+  }
   if (msg.type === "UtteranceEnd") return endNovaTurn(s);
   if (msg.type !== "Results") return;
   const alt = msg.channel?.alternatives?.[0];
@@ -388,10 +396,20 @@ let session = null; // non-null while unmuted (or connecting)
 async function unmute() {
   showError("");
   setStatus("connecting", "Connecting…");
-  const s = { asr, ws: null, ctx: null, stream: null, queue: [], openedAt: 0, sentSec: 0, finals: "", lastWordEnd: 0 };
+  const s = { asr, ws: null, ctx: null, stream: null, queue: [], openedAt: 0, sentSec: 0, finals: "", lastWordEnd: 0, audioTimer: 0 };
   session = s;
   try {
-    s.ctx = new AudioContext({ sampleRate: 16000, latencyHint: "interactive" });
+    // 16 kHz is what Deepgram recommends. Some Safari versions reject it and
+    // throw; the hardware rate is a supported fallback and is sent below.
+    try {
+      s.ctx = new AudioContext({ sampleRate: 16000, latencyHint: "interactive" });
+    } catch (e) {
+      if (e.name !== "NotSupportedError") throw e;
+      s.ctx = new AudioContext({ latencyHint: "interactive" });
+    }
+    // Safari/iOS only resumes a context during the tap. The awaits below leave
+    // that gesture, so resume now and hold the promise.
+    const resumed = s.ctx.resume();
     const rate = s.ctx.sampleRate;
     if (!SAMPLE_RATES.includes(rate)) throw new Error(`Unsupported microphone sample rate: ${rate} Hz`);
 
@@ -418,6 +436,8 @@ async function unmute() {
     const sendAudio = (chunk) => {
       ws.send(chunk);
       s.sentSec += chunk.byteLength / 2 / rate;
+      clearTimeout(s.audioTimer);
+      s.audioTimer = 0;
     };
     ws.onopen = () => {
       s.openedAt = Date.now();
@@ -425,6 +445,15 @@ async function unmute() {
       s.queue = [];
       if (session === s) setStatus("listening", "Listening");
       holdScreen();
+      // The socket can be healthy while the mic graph sends nothing. Say so,
+      // instead of sitting on Listening with an empty Deepgram stream.
+      if (s.sentSec === 0) {
+        s.audioTimer = setTimeout(() => {
+          s.audioTimer = 0;
+          if (session !== s || s.sentSec > 0 || !els.error.hidden) return;
+          showError("No microphone audio is being sent. Check the input device and unmute again.");
+        }, 3000);
+      }
     };
     ws.onmessage = (e) => {
       if (typeof e.data === "string") (s.asr === "flux" ? onFlux : onNova)(JSON.parse(e.data), s);
@@ -449,8 +478,12 @@ async function unmute() {
       if (ws.readyState === WebSocket.OPEN) sendAudio(e.data);
       else if (ws.readyState === WebSocket.CONNECTING && s.queue.length < 100) s.queue.push(e.data);
     };
+    node.onprocessorerror = () => {
+      if (session === s) showError("Microphone processing failed. Unmute and try again.");
+    };
     s.ctx.createMediaStreamSource(s.stream).connect(node);
-    await s.ctx.resume();
+    await resumed;
+    if (session === s && s.ctx.state !== "running") throw new Error("Audio stayed suspended. Tap Unmute again.");
   } catch (e) {
     if (session !== s) return;
     closeSession(s);
@@ -461,6 +494,8 @@ async function unmute() {
 }
 
 function closeSession(s) {
+  clearTimeout(s.audioTimer);
+  s.audioTimer = 0;
   s.stream?.getTracks().forEach((t) => t.stop());
   s.ctx?.close().catch(() => {});
   const ws = s.ws;
