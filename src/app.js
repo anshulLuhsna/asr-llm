@@ -20,6 +20,7 @@ const ASR = {
 const SAMPLE_RATES = [8000, 16000, 24000, 44100, 48000];
 const STORE = {
   chats: "voicechat.chats.v1", active: "voicechat.active", prompt: "voicechat.systemPrompt", asr: "voicechat.asr",
+  password: "voicechat.password",
 };
 
 const $ = (id) => document.getElementById(id);
@@ -43,6 +44,22 @@ function save(key, value) {
     localStorage.setItem(key, JSON.stringify(value));
   } catch (e) {
     showError(`Could not save to browser storage: ${e.message}`);
+  }
+}
+
+// POST to this app's own API. If the deployment is password-protected, ask
+// once, remember the answer in this browser, and retry.
+async function api(path, init = {}) {
+  for (let attempt = 0; ; attempt++) {
+    const res = await fetch(path, {
+      ...init,
+      method: "POST",
+      headers: { ...init.headers, "x-app-password": load(STORE.password, "") },
+    });
+    if (res.status !== 401 || attempt) return res;
+    const entered = prompt("This app is password-protected. Enter the app password:");
+    if (!entered) return res;
+    save(STORE.password, entered);
   }
 }
 
@@ -190,8 +207,7 @@ function startAnswer(transcript) {
 }
 
 async function streamCompletion(a, messages) {
-  const res = await fetch("/api/chat", {
-    method: "POST",
+  const res = await api("/api/chat", {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ system: systemPrompt, messages }),
     signal: a.ctrl.signal,
@@ -306,7 +322,7 @@ function showInterim(transcript) {
   if (answer && !answer.committed) answer.row.before(userRow);
 }
 // Open the server's connection to Groq while the user is still talking.
-const warm = () => fetch("/api/warm", { method: "POST" }).catch(() => {});
+const warm = () => api("/api/warm").catch(() => {});
 
 // Delay between the end of the last word and the model declaring the turn over,
 // using the amount of audio sent so far as the clock.
@@ -381,7 +397,7 @@ async function unmute() {
 
     // Token, mic permission and worklet load all run in parallel; audio captured
     // before the socket opens is queued so the first words are not lost.
-    const tokenP = fetch("/api/deepgram-token", { method: "POST" }).then(async (r) => {
+    const tokenP = api("/api/deepgram-token").then(async (r) => {
       const body = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(body.error || `Token request failed (${r.status})`);
       return body.access_token;
@@ -389,7 +405,7 @@ async function unmute() {
     const micP = navigator.mediaDevices.getUserMedia({
       audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
     });
-    const workletP = s.ctx.audioWorklet.addModule("pcm-worklet.js");
+    const workletP = s.ctx.audioWorklet.addModule("/pcm-worklet.js");
     micP.catch(() => {});
     workletP.catch(() => {});
 
@@ -408,6 +424,7 @@ async function unmute() {
       s.queue.forEach(sendAudio);
       s.queue = [];
       if (session === s) setStatus("listening", "Listening");
+      holdScreen();
     };
     ws.onmessage = (e) => {
       if (typeof e.data === "string") (s.asr === "flux" ? onFlux : onNova)(JSON.parse(e.data), s);
@@ -460,7 +477,24 @@ function closeSession(s) {
   setTimeout(() => ws.close(), 2000);
 }
 
+// Keep the phone screen on while listening; a sleeping screen stops the mic.
+let wakeLock = null;
+async function holdScreen() {
+  if (!session || wakeLock || document.visibilityState !== "visible") return;
+  try {
+    wakeLock = await navigator.wakeLock?.request("screen");
+    wakeLock?.addEventListener("release", () => (wakeLock = null));
+    if (!session) releaseScreen();
+  } catch {}
+}
+function releaseScreen() {
+  wakeLock?.release().catch(() => {});
+  wakeLock = null;
+}
+document.addEventListener("visibilitychange", holdScreen);
+
 function mute() {
+  releaseScreen();
   const s = session;
   session = null;
   if (s) closeSession(s);
@@ -487,6 +521,7 @@ $("newChat").onclick = () => {
   document.body.classList.remove("sidebar-open");
 };
 $("toggleSidebar").onclick = () => document.body.classList.toggle("sidebar-open");
+$("messages").onclick = () => document.body.classList.remove("sidebar-open");
 $("openSettings").onclick = () => {
   els.prompt.value = systemPrompt;
   els.settings.showModal();

@@ -4,9 +4,13 @@ Talk into your microphone and get written answers. Speech is transcribed by
 Deepgram's latest streaming model (**Flux**, `flux-general-en`) and answered by
 **`openai/gpt-oss-120b`** on Groq, streamed token by token.
 
-## Run
+## Run locally
 
-Requires Node 22.9+. There are no dependencies to install.
+Requires Node 22+.
+
+```bash
+npm install
+```
 
 ```bash
 cp .env.example .env
@@ -15,10 +19,24 @@ cp .env.example .env
 Put your `DEEPGRAM_API_KEY` and `GROQ_API_KEY` in `.env`, then:
 
 ```bash
-npm start
+npm run dev
 ```
 
-Open http://localhost:3000 and press **Unmute**.
+Open http://localhost:5173 and press **Unmute**. The Vite dev server also runs the
+functions in `/api`, so no second process is needed.
+
+## Deploy to Vercel (and use it on your phone)
+
+1. Import this repository at https://vercel.com/new. Vercel detects Vite; keep the defaults.
+2. Under **Environment Variables**, add `DEEPGRAM_API_KEY`, `GROQ_API_KEY` and — strongly
+   recommended — `APP_PASSWORD`.
+3. Deploy, open the URL on your phone, and allow microphone access.
+
+Without `APP_PASSWORD`, anyone who finds the URL can use your Deepgram and Groq credits.
+With it, the app asks for the password once per browser and remembers it.
+
+The screen is kept awake while unmuted, because a sleeping phone stops the microphone.
+Chats are stored per browser, so your phone and laptop each keep their own list.
 
 ## Features
 
@@ -41,10 +59,13 @@ Open http://localhost:3000 and press **Unmute**.
 - Audio is 16 kHz `linear16` sent in 80 ms chunks, as Deepgram recommends for Flux.
 - **Speculative answers**: Flux's `EagerEndOfTurn` starts the Groq request before the
   turn is confirmed. `TurnResumed` cancels it; `EndOfTurn` keeps it.
-- The server holds a keep-alive connection to Groq and re-warms it at `StartOfTurn`,
-  while you are still speaking.
-- Groq runs with `reasoning_effort: "low"` and `include_reasoning: false`, and its SSE
-  stream is piped through untouched.
+- At `StartOfTurn`, while you are still speaking, the app pings `/api/warm` so the
+  function instance is awake and its connection to Groq is already open.
+- Groq is called with `stream: true`, and its server-sent-event stream is handed to the
+  browser untouched, so each token is painted as it is generated.
+- Groq is tuned for latency: `reasoning_effort: "low"`, `include_reasoning: false` (no
+  reasoning text ahead of the answer), and `service_tier: "auto"` (the fastest tier your
+  account has).
 - Token fetch, mic permission and worklet load run in parallel on unmute; audio captured
   before the socket opens is queued, so first words are not lost.
 
@@ -54,11 +75,12 @@ Open http://localhost:3000 and press **Unmute**.
 |---|---|---|
 | `DEEPGRAM_API_KEY` | — | Needs Member permissions or higher (required by `/v1/auth/grant`). |
 | `GROQ_API_KEY` | — | |
-| `PORT` | `3000` | |
+| `APP_PASSWORD` | — | If set, required to use the app. Set this on any public deployment. |
 | `GROQ_MODEL` | `openai/gpt-oss-120b` | |
 | `GROQ_REASONING_EFFORT` | `low` | `low`, `medium` or `high` |
+| `GROQ_SERVICE_TIER` | `auto` | `auto`, `on_demand`, `flex` or `performance` (enterprise) |
 
-Turn-detection settings are in the `ASR` table at the top of `public/app.js`: Flux uses
+Turn-detection settings are in the `ASR` table at the top of `src/app.js`: Flux uses
 `eot_threshold`, `eager_eot_threshold` and `eot_timeout_ms`; Nova-3 uses `endpointing`
 (300 ms of silence) and `utterance_end_ms`. Speculative answers are Flux-only, since Nova-3
 has no eager end-of-turn signal. For non-English speech, switch the model there to `flux-general-multi`.
@@ -68,4 +90,5 @@ has no eager end-of-turn signal. For non-English speech, switch the model there 
 - Deepgram Flux: https://developers.deepgram.com/docs/flux/quickstart, https://developers.deepgram.com/docs/flux/state, https://developers.deepgram.com/reference/speech-to-text/listen-flux
 - Deepgram Nova-3 streaming: https://developers.deepgram.com/reference/speech-to-text/listen-streaming, https://developers.deepgram.com/docs/understand-endpointing-interim-results
 - Deepgram tokens: https://developers.deepgram.com/guides/fundamentals/token-based-authentication
-- Groq: https://console.groq.com/docs/model/openai/gpt-oss-120b, https://console.groq.com/docs/reasoning, https://console.groq.com/docs/api-reference
+- Groq: https://console.groq.com/docs/model/openai/gpt-oss-120b, https://console.groq.com/docs/reasoning, https://console.groq.com/docs/service-tiers, https://console.groq.com/docs/api-reference
+- Vercel Functions streaming: https://vercel.com/docs/functions/streaming-functions
