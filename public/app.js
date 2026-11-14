@@ -2,9 +2,25 @@ const DEFAULT_SYSTEM_PROMPT =
   "You are a fast voice assistant. The user's messages are live speech transcripts, so tolerate small transcription errors. " +
   "Answer directly and concisely in plain text, with no markdown and no preamble.";
 
-const FLUX_URL = "wss://api.deepgram.com/v2/listen";
-const FLUX_SAMPLE_RATES = [8000, 16000, 24000, 44100, 48000];
-const STORE = { chats: "voicechat.chats.v1", active: "voicechat.active", prompt: "voicechat.systemPrompt" };
+// The two Deepgram speech-to-text models that can be compared from the header toggle.
+const ASR = {
+  flux: {
+    label: "Flux",
+    url: "wss://api.deepgram.com/v2/listen",
+    // Model-native turn detection, with eager end-of-turn for speculative answers.
+    params: { model: "flux-general-en", eot_threshold: "0.7", eager_eot_threshold: "0.5", eot_timeout_ms: "3000" },
+  },
+  nova: {
+    label: "Nova-3",
+    url: "wss://api.deepgram.com/v1/listen",
+    // Turn end = silence-based endpointing (speech_final), with UtteranceEnd as the fallback.
+    params: { model: "nova-3", interim_results: "true", endpointing: "300", utterance_end_ms: "1000", smart_format: "true" },
+  },
+};
+const SAMPLE_RATES = [8000, 16000, 24000, 44100, 48000];
+const STORE = {
+  chats: "voicechat.chats.v1", active: "voicechat.active", prompt: "voicechat.systemPrompt", asr: "voicechat.asr",
+};
 
 const $ = (id) => document.getElementById(id);
 const els = {
@@ -32,6 +48,7 @@ function save(key, value) {
 
 let chats = load(STORE.chats, []);
 let systemPrompt = load(STORE.prompt, DEFAULT_SYSTEM_PROMPT);
+let asr = load(STORE.asr, "flux") in ASR ? load(STORE.asr, "flux") : "flux";
 let chat = chats.find((c) => c.id === load(STORE.active, null)) || newChatObject();
 
 function newChatObject() {
@@ -46,14 +63,20 @@ function persistChat() {
 
 // ---------- Rendering ----------
 
-function bubble(role, text, extraClass = "") {
+function bubble(role, text, extraClass = "", meta = "") {
   const row = document.createElement("div");
   row.className = `msg ${role} ${extraClass}`.trim();
   const b = document.createElement("div");
   b.className = "bubble";
   b.textContent = text;
   row.append(b);
+  if (meta) setMeta(row, meta);
   return row;
+}
+function setMeta(row, meta) {
+  const m = row.querySelector(".meta") || row.appendChild(document.createElement("div"));
+  m.className = "meta";
+  m.textContent = meta;
 }
 function setText(row, text) {
   row.firstChild.textContent = text;
@@ -68,7 +91,7 @@ const nearBottom = () => els.messages.scrollHeight - els.messages.scrollTop - el
 const scrollDown = () => (els.messages.scrollTop = els.messages.scrollHeight);
 
 function renderMessages() {
-  els.messages.replaceChildren(...chat.messages.map((m) => bubble(m.role, m.content)));
+  els.messages.replaceChildren(...chat.messages.map((m) => bubble(m.role, m.content, "", m.meta)));
   if (!chat.messages.length) {
     const empty = document.createElement("p");
     empty.className = "empty";
@@ -196,6 +219,10 @@ async function streamCompletion(a, messages) {
       added += chunk.choices?.[0]?.delta?.content || "";
     }
     if (added) {
+      if (!a.text) {
+        a.firstAt = performance.now();
+        updateMeta(a);
+      }
       a.text += added;
       const stick = nearBottom();
       setText(a.row, a.text);
@@ -206,6 +233,22 @@ async function streamCompletion(a, messages) {
       }
     }
   }
+}
+
+// Latency line under each answer, measured from the end of the last spoken word:
+// how long the speech model took to call the turn over, and when the first token landed.
+function updateMeta(a) {
+  if (!a.committed || !a.firstAt) return;
+  const { asr: label, eotMs } = a.stats;
+  const parts = [label];
+  if (eotMs != null) {
+    parts.push(`turn end +${Math.round(eotMs)} ms`);
+    parts.push(`first token +${Math.round(Math.max(0, eotMs + a.firstAt - a.eotAt))} ms`);
+  } else {
+    parts.push(`first token ${Math.round(Math.max(0, a.firstAt - a.eotAt))} ms after turn end`);
+  }
+  a.msg.meta = parts.join(" · ");
+  setMeta(a.row, a.msg.meta);
 }
 
 function finalizeAnswer(a) {
@@ -225,7 +268,7 @@ function stopAnswer(a, discard) {
   if (answer === a) answer = null;
 }
 
-function commitTurn(transcript) {
+function commitTurn(transcript, stats) {
   if (!answer || answer.committed || answer.transcript !== transcript) startAnswer(transcript);
   const a = answer;
   userRow?.remove();
@@ -237,6 +280,9 @@ function commitTurn(transcript) {
   a.msg = { role: "assistant", content: a.text };
   chat.messages.push({ role: "user", content: transcript }, a.msg);
   a.committed = true;
+  a.stats = stats;
+  a.eotAt = performance.now();
+  updateMeta(a);
   persistChat();
   els.chatTitle.textContent = chat.title;
   renderChatList();
@@ -249,26 +295,36 @@ function dropLiveTurn() {
   userRow = null;
 }
 
-// ---------- Deepgram Flux turn events ----------
+// ---------- Deepgram turn events ----------
 
-function onFlux(msg) {
+function showInterim(transcript) {
+  if (!userRow) {
+    userRow = bubble("user", transcript, "interim");
+    append(userRow);
+  } else setText(userRow, transcript);
+  // Keep the transcript above a speculative answer.
+  if (answer && !answer.committed) answer.row.before(userRow);
+}
+// Open the server's connection to Groq while the user is still talking.
+const warm = () => fetch("/api/warm", { method: "POST" }).catch(() => {});
+
+// Delay between the end of the last word and the model declaring the turn over,
+// using the amount of audio sent so far as the clock.
+function turnStats(s, lastWordEnd) {
+  const eotMs = (s.sentSec - lastWordEnd) * 1000;
+  return { asr: ASR[s.asr].label, eotMs: Number.isFinite(eotMs) && eotMs >= 0 ? eotMs : null };
+}
+
+// Flux (/v2/listen): TurnInfo events carry the whole turn's transcript.
+function onFlux(msg, s) {
   if (msg.type === "Error") return showError(`Deepgram: ${msg.description || msg.code}`);
   if (msg.type !== "TurnInfo") return;
   const transcript = (msg.transcript || "").trim();
-
-  if (msg.event !== "EndOfTurn" && transcript) {
-    if (!userRow) {
-      userRow = bubble("user", transcript, "interim");
-      append(userRow);
-    } else setText(userRow, transcript);
-    // Keep the transcript above a speculative answer.
-    if (answer && !answer.committed) answer.row.before(userRow);
-  }
+  if (msg.event !== "EndOfTurn" && transcript) showInterim(transcript);
 
   switch (msg.event) {
     case "StartOfTurn":
-      // Open the server's connection to Groq while the user is still talking.
-      fetch("/api/warm", { method: "POST" }).catch(() => {});
+      warm();
       break;
     case "EagerEndOfTurn":
       // Speculate: start answering before the turn is confirmed over.
@@ -278,10 +334,35 @@ function onFlux(msg) {
       if (answer && !answer.committed) stopAnswer(answer, true);
       break;
     case "EndOfTurn":
-      if (transcript) commitTurn(transcript);
+      if (transcript) commitTurn(transcript, turnStats(s, msg.words?.at(-1)?.end));
       else dropLiveTurn();
       break;
   }
+}
+
+// Nova-3 (/v1/listen): finalized segments are concatenated until speech_final
+// (or UtteranceEnd) marks the end of the utterance.
+function onNova(msg, s) {
+  if (msg.type === "UtteranceEnd") return endNovaTurn(s);
+  if (msg.type !== "Results") return;
+  const alt = msg.channel?.alternatives?.[0];
+  const text = (alt?.transcript || "").trim();
+  if (text) {
+    if (!s.finals && !userRow) warm();
+    const soFar = `${s.finals} ${text}`.trim();
+    if (msg.is_final) {
+      s.finals = soFar;
+      s.lastWordEnd = alt.words?.at(-1)?.end ?? msg.start + msg.duration;
+    }
+    showInterim(soFar);
+  }
+  if (msg.speech_final) endNovaTurn(s);
+}
+function endNovaTurn(s) {
+  if (!s.finals) return;
+  const transcript = s.finals;
+  s.finals = "";
+  commitTurn(transcript, turnStats(s, s.lastWordEnd));
 }
 
 // ---------- Microphone + Deepgram WebSocket ----------
@@ -291,12 +372,12 @@ let session = null; // non-null while unmuted (or connecting)
 async function unmute() {
   showError("");
   setStatus("connecting", "Connecting…");
-  const s = { ws: null, ctx: null, stream: null, queue: [], openedAt: 0 };
+  const s = { asr, ws: null, ctx: null, stream: null, queue: [], openedAt: 0, sentSec: 0, finals: "", lastWordEnd: 0 };
   session = s;
   try {
     s.ctx = new AudioContext({ sampleRate: 16000, latencyHint: "interactive" });
     const rate = s.ctx.sampleRate;
-    if (!FLUX_SAMPLE_RATES.includes(rate)) throw new Error(`Unsupported microphone sample rate: ${rate} Hz`);
+    if (!SAMPLE_RATES.includes(rate)) throw new Error(`Unsupported microphone sample rate: ${rate} Hz`);
 
     // Token, mic permission and worklet load all run in parallel; audio captured
     // before the socket opens is queued so the first words are not lost.
@@ -314,26 +395,25 @@ async function unmute() {
 
     const token = await tokenP;
     if (session !== s) return closeSession(s);
-    const params = new URLSearchParams({
-      model: "flux-general-en",
-      encoding: "linear16",
-      sample_rate: String(rate),
-      eot_threshold: "0.7",
-      eager_eot_threshold: "0.5",
-      eot_timeout_ms: "3000",
-    });
-    const ws = new WebSocket(`${FLUX_URL}?${params}`, ["bearer", token]);
+    const model = ASR[s.asr];
+    const params = new URLSearchParams({ ...model.params, encoding: "linear16", sample_rate: String(rate) });
+    const ws = new WebSocket(`${model.url}?${params}`, ["bearer", token]);
     s.ws = ws;
+    const sendAudio = (chunk) => {
+      ws.send(chunk);
+      s.sentSec += chunk.byteLength / 2 / rate;
+    };
     ws.onopen = () => {
       s.openedAt = Date.now();
-      for (const chunk of s.queue) ws.send(chunk);
+      s.queue.forEach(sendAudio);
       s.queue = [];
       if (session === s) setStatus("listening", "Listening");
     };
     ws.onmessage = (e) => {
-      if (typeof e.data === "string") onFlux(JSON.parse(e.data));
+      if (typeof e.data === "string") (s.asr === "flux" ? onFlux : onNova)(JSON.parse(e.data), s);
     };
     ws.onclose = (e) => {
+      if (s.asr === "nova") endNovaTurn(s); // answer whatever was flushed on mute
       if (session !== s) return;
       // Dropped mid-session: reconnect once it has proven it can stay up.
       const stable = s.openedAt && Date.now() - s.openedAt > 5000;
@@ -341,7 +421,7 @@ async function unmute() {
       session = null;
       if (stable) return unmute();
       setStatus("error", "Disconnected");
-      showError(`Deepgram connection closed${e.reason ? `: ${e.reason}` : ` (code ${e.code})`}. Check the API key and Flux access.`);
+      showError(`Deepgram connection closed${e.reason ? `: ${e.reason}` : ` (code ${e.code})`}. Check the API key and ${ASR[s.asr].label} access.`);
     };
 
     s.stream = await micP;
@@ -349,7 +429,7 @@ async function unmute() {
     if (session !== s) return closeSession(s);
     const node = new AudioWorkletNode(s.ctx, "pcm-worklet", { numberOfOutputs: 0 });
     node.port.onmessage = (e) => {
-      if (ws.readyState === WebSocket.OPEN) ws.send(e.data);
+      if (ws.readyState === WebSocket.OPEN) sendAudio(e.data);
       else if (ws.readyState === WebSocket.CONNECTING && s.queue.length < 100) s.queue.push(e.data);
     };
     s.ctx.createMediaStreamSource(s.stream).connect(node);
@@ -374,7 +454,8 @@ function closeSession(s) {
   }
   // Finish the sentence in flight so muting mid-thought still gets an answer,
   // then let Deepgram flush and close. The timer is a backstop.
-  if (userRow) ws.send(JSON.stringify({ type: "ForceEndTurn" }));
+  if (s.asr === "nova") ws.send(JSON.stringify({ type: "Finalize" }));
+  else if (userRow) ws.send(JSON.stringify({ type: "ForceEndTurn" }));
   ws.send(JSON.stringify({ type: "CloseStream" }));
   setTimeout(() => ws.close(), 2000);
 }
@@ -389,6 +470,18 @@ function mute() {
 // ---------- Wiring ----------
 
 els.mic.onclick = () => (session ? mute() : unmute());
+for (const input of document.querySelectorAll('input[name="asr"]')) {
+  input.checked = input.value === asr;
+  input.onchange = () => {
+    asr = input.value;
+    save(STORE.asr, asr);
+    // Switch models on the fly: finish the current stream and reconnect.
+    if (session) {
+      mute();
+      unmute();
+    }
+  };
+}
 $("newChat").onclick = () => {
   if (chat.messages.length || userRow || answer) switchChat(newChatObject());
   document.body.classList.remove("sidebar-open");

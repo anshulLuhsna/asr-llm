@@ -24,6 +24,10 @@ Open http://localhost:3000 and press **Unmute**.
 
 - **Mute / Unmute** — unmute opens the mic and the Deepgram stream; mute releases both.
   Muting mid-sentence still answers what you said so far.
+- **Flux / Nova-3 toggle** in the header to compare Deepgram's two speech models. Switching
+  while unmuted reconnects on the other model. Each answer is labelled with the model used
+  and two latencies, both measured from the end of your last word: when the model declared
+  the turn over, and when the first answer token arrived.
 - **New chat** and a chat list with delete.
 - **System prompt** — editable from the sidebar, applied to every request.
 - **Local storage only** — chats and the system prompt live in the browser's
@@ -54,11 +58,14 @@ Open http://localhost:3000 and press **Unmute**.
 | `GROQ_MODEL` | `openai/gpt-oss-120b` | |
 | `GROQ_REASONING_EFFORT` | `low` | `low`, `medium` or `high` |
 
-Turn-detection settings (`eot_threshold`, `eager_eot_threshold`, `eot_timeout_ms`) are in
-`public/app.js`. For non-English speech, switch the model there to `flux-general-multi`.
+Turn-detection settings are in the `ASR` table at the top of `public/app.js`: Flux uses
+`eot_threshold`, `eager_eot_threshold` and `eot_timeout_ms`; Nova-3 uses `endpointing`
+(300 ms of silence) and `utterance_end_ms`. Speculative answers are Flux-only, since Nova-3
+has no eager end-of-turn signal. For non-English speech, switch the model there to `flux-general-multi`.
 
 ## Docs used
 
 - Deepgram Flux: https://developers.deepgram.com/docs/flux/quickstart, https://developers.deepgram.com/docs/flux/state, https://developers.deepgram.com/reference/speech-to-text/listen-flux
+- Deepgram Nova-3 streaming: https://developers.deepgram.com/reference/speech-to-text/listen-streaming, https://developers.deepgram.com/docs/understand-endpointing-interim-results
 - Deepgram tokens: https://developers.deepgram.com/guides/fundamentals/token-based-authentication
 - Groq: https://console.groq.com/docs/model/openai/gpt-oss-120b, https://console.groq.com/docs/reasoning, https://console.groq.com/docs/api-reference
