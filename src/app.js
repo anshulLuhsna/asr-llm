@@ -20,7 +20,7 @@ const ASR = {
 const SAMPLE_RATES = [8000, 16000, 24000, 44100, 48000];
 const STORE = {
   chats: "voicechat.chats.v1", active: "voicechat.active", prompt: "voicechat.systemPrompt", asr: "voicechat.asr",
-  password: "voicechat.password",
+  password: "voicechat.password", auth: "voicechat.dgAuth",
 };
 
 const $ = (id) => document.getElementById(id);
@@ -429,54 +429,68 @@ async function unmute() {
 
     const token = await tokenP;
     if (session !== s) return closeSession(s);
-    const model = ASR[s.asr];
-    const params = new URLSearchParams({ ...model.params, encoding: "linear16", sample_rate: String(rate) });
-    const ws = new WebSocket(`${model.url}?${params}`, ["bearer", token]);
-    s.ws = ws;
     const sendAudio = (chunk) => {
-      ws.send(chunk);
+      s.ws.send(chunk);
       s.sentSec += chunk.byteLength / 2 / rate;
       clearTimeout(s.audioTimer);
       s.audioTimer = 0;
     };
-    ws.onopen = () => {
-      s.openedAt = Date.now();
-      s.queue.forEach(sendAudio);
-      s.queue = [];
-      if (session === s) setStatus("listening", "Listening");
-      holdScreen();
-      // The socket can be healthy while the mic graph sends nothing. Say so,
-      // instead of sitting on Listening with an empty Deepgram stream.
-      if (s.sentSec === 0) {
-        s.audioTimer = setTimeout(() => {
-          s.audioTimer = 0;
-          if (session !== s || s.sentSec > 0 || !els.error.hidden) return;
-          showError("No microphone audio is being sent. Check the input device and unmute again.");
-        }, 3000);
-      }
+    // Browsers cannot set an Authorization header on a WebSocket, so the token
+    // goes in the subprotocol ("bearer") or, if Deepgram refuses that, in the
+    // query string ("query"). Whichever works is remembered for next time.
+    const connect = ([method, ...fallbacks]) => {
+      const model = ASR[s.asr];
+      const params = new URLSearchParams({ ...model.params, encoding: "linear16", sample_rate: String(rate) });
+      if (method === "query") params.set("access_token", token);
+      const url = `${model.url}?${params}`;
+      const ws = method === "bearer" ? new WebSocket(url, ["bearer", token]) : new WebSocket(url);
+      s.ws = ws;
+      ws.onopen = () => {
+        s.openedAt = Date.now();
+        save(STORE.auth, method);
+        s.queue.forEach(sendAudio);
+        s.queue = [];
+        if (session === s) setStatus("listening", "Listening");
+        holdScreen();
+        // The socket can be healthy while the mic graph sends nothing. Say so,
+        // instead of sitting on Listening with an empty Deepgram stream.
+        if (s.sentSec === 0) {
+          s.audioTimer = setTimeout(() => {
+            s.audioTimer = 0;
+            if (session !== s || s.sentSec > 0 || !els.error.hidden) return;
+            showError("No microphone audio is being sent. Check the input device and unmute again.");
+          }, 3000);
+        }
+      };
+      ws.onmessage = (e) => {
+        if (typeof e.data === "string") (s.asr === "flux" ? onFlux : onNova)(JSON.parse(e.data), s);
+      };
+      ws.onclose = (e) => {
+        if (s.asr === "nova") endNovaTurn(s); // answer whatever was flushed on mute
+        if (session !== s) return;
+        if (!s.openedAt && fallbacks.length) return connect(fallbacks);
+        // Dropped mid-session: reconnect once it has proven it can stay up.
+        const stable = s.openedAt && Date.now() - s.openedAt > 5000;
+        closeSession(s);
+        session = null;
+        if (stable) return unmute();
+        setStatus("error", "Disconnected");
+        showError(`Deepgram connection closed${e.reason ? `: ${e.reason}` : ` (code ${e.code})`}. Check the API key and ${ASR[s.asr].label} access.`);
+      };
     };
-    ws.onmessage = (e) => {
-      if (typeof e.data === "string") (s.asr === "flux" ? onFlux : onNova)(JSON.parse(e.data), s);
-    };
-    ws.onclose = (e) => {
-      if (s.asr === "nova") endNovaTurn(s); // answer whatever was flushed on mute
-      if (session !== s) return;
-      // Dropped mid-session: reconnect once it has proven it can stay up.
-      const stable = s.openedAt && Date.now() - s.openedAt > 5000;
-      closeSession(s);
-      session = null;
-      if (stable) return unmute();
-      setStatus("error", "Disconnected");
-      showError(`Deepgram connection closed${e.reason ? `: ${e.reason}` : ` (code ${e.code})`}. Check the API key and ${ASR[s.asr].label} access.`);
-    };
+    connect(load(STORE.auth, "bearer") === "query" ? ["query", "bearer"] : ["bearer", "query"]);
 
     s.stream = await micP;
     await workletP;
     if (session !== s) return closeSession(s);
     const node = new AudioWorkletNode(s.ctx, "pcm-worklet", { numberOfOutputs: 0 });
     node.port.onmessage = (e) => {
-      if (ws.readyState === WebSocket.OPEN) sendAudio(e.data);
-      else if (ws.readyState === WebSocket.CONNECTING && s.queue.length < 100) s.queue.push(e.data);
+      // Mic level, shown on the button so you can see it hearing you.
+      let peak = 0;
+      for (const v of new Int16Array(e.data)) if (v > peak) peak = v;
+      els.mic.style.setProperty("--level", Math.min(1, peak / 8000).toFixed(2));
+      if (s.ws.readyState === WebSocket.OPEN) sendAudio(e.data);
+      else if (s.ws.readyState === WebSocket.CONNECTING && s.queue.length < 100) s.queue.push(e.data);
     };
     node.onprocessorerror = () => {
       if (session === s) showError("Microphone processing failed. Unmute and try again.");
@@ -530,6 +544,7 @@ document.addEventListener("visibilitychange", holdScreen);
 
 function mute() {
   releaseScreen();
+  els.mic.style.removeProperty("--level");
   const s = session;
   session = null;
   if (s) closeSession(s);

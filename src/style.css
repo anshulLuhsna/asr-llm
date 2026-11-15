@@ -112,9 +112,8 @@ footer {
 .mic { display: inline-flex; align-items: center; gap: 10px; padding: 12px 28px; border-radius: 999px; font-weight: 600; font-size: 1.05rem; }
 .mic .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); }
 .mic[aria-pressed="true"] { border-color: var(--live); }
-.mic[aria-pressed="true"] .dot { background: var(--live); animation: pulse 1.4s infinite; }
-@keyframes pulse { 50% { opacity: .3; } }
-@media (prefers-reduced-motion: reduce) { .mic .dot { animation: none !important; } }
+/* The dot grows with the microphone level. */
+.mic[aria-pressed="true"] .dot { background: var(--live); transform: scale(calc(1 + 1.6 * var(--level, 0))); transition: transform .08s; }
 .hint { margin: 0; font-size: .85rem; color: var(--muted); }
 #error { margin: 0; color: var(--danger); font-size: .9rem; text-align: center; }
 
