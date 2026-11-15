@@ -1,4 +1,4 @@
-import { groqUrl, json, unauthorized } from "../server/shared.js";
+import { groqUrl, json, trimHistory, unauthorized } from "../server/shared.js";
 
 // Streams a Groq chat completion back to the browser as server-sent events.
 // Low-latency setup: stream=true, minimal reasoning with the reasoning text left
@@ -16,12 +16,14 @@ export async function POST(request) {
   } catch {
     return json(400, { error: "Request body must be JSON" });
   }
-  const messages = Array.isArray(payload.messages)
+  const history = Array.isArray(payload.messages)
     ? payload.messages
         .filter((m) => (m.role === "user" || m.role === "assistant") && typeof m.content === "string" && m.content)
         .map((m) => ({ role: m.role, content: m.content }))
     : [];
-  if (!messages.length) return json(400, { error: "messages is required" });
+  if (!history.length) return json(400, { error: "messages is required" });
+  // Only the conversation is trimmed; the system prompt is always sent in full.
+  const messages = trimHistory(history, Number(process.env.HISTORY_TOKEN_BUDGET) || 6000);
   if (typeof payload.system === "string" && payload.system.trim()) {
     messages.unshift({ role: "system", content: payload.system });
   }

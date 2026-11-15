@@ -17,3 +17,20 @@ export function unauthorized(request) {
 
 export const groqUrl = (path) => (process.env.GROQ_BASE_URL || "https://api.groq.com") + path;
 export const deepgramUrl = (path) => (process.env.DEEPGRAM_BASE_URL || "https://api.deepgram.com") + path;
+
+// Keeps the newest messages that fit a token budget and drops the oldest, so a
+// long chat stays fast and never overflows the model's context window. Tokens
+// are estimated at 3 characters each, which errs on the side of trimming early.
+// The latest message is always kept, and the result always opens on a user turn.
+export function trimHistory(messages, budget) {
+  let used = 0;
+  let start = messages.length;
+  while (start > 0) {
+    const cost = Math.ceil(messages[start - 1].content.length / 3) + 4;
+    if (start < messages.length && used + cost > budget) break;
+    used += cost;
+    start--;
+  }
+  while (start < messages.length - 1 && messages[start].role !== "user") start++;
+  return messages.slice(start);
+}

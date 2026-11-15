@@ -78,6 +78,7 @@ Chats are stored per browser, so your phone and laptop each keep their own list.
 | `APP_PASSWORD` | — | If set, required to use the app. Set this on any public deployment. |
 | `GROQ_MODEL` | `openai/gpt-oss-120b` | |
 | `GROQ_REASONING_EFFORT` | `low` | `low`, `medium` or `high` |
+| `HISTORY_TOKEN_BUDGET` | `6000` | Estimated tokens of recent conversation sent each turn. Oldest messages are dropped first; the system prompt is always sent in full. |
 | `GROQ_SERVICE_TIER` | `auto` | `auto`, `on_demand`, `flex` or `performance` (enterprise) |
 
 Turn-detection settings are in the `ASR` table at the top of `src/app.js`: Flux uses
